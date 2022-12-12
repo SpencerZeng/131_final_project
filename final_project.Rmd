@@ -1,0 +1,742 @@
+---
+title: "Heart Disease Indicators"
+author: "Spencer Zeng"
+date: '2022-12-11'
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+    code_folding: hide
+  pdf_document:
+    toc: yes
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,warning = FALSE,message = FALSE)
+```
+
+## Introduction
+
+### Background
+
+Coronary heart disease occurs when plaque builds up, causing arteries to narrow and limiting the flow of oxygen-rich blood to the heart. It is common among U.S. population and can last for years or be lifelong.
+
+[![](Screen%20Shot%202022-12-06%20at%203.33.48%20PM.png){width="1777" height="344"}](https://reference.jrank.org/diets/Coronary_Heart_Disease.html)
+
+The Behavioral Risk Factor Surveillance System (BRFSS) is a program administered by CDC. Since 1984, BRFSS has been collecting data about U.S. residents regarding their physical and mental health, past and present health conditions, and access to healthcare. Each year, a standard survey questionnaire is developed that includes questions about : demographic information; current health perceptions, conditions, and behaviors; substance use; and diet.
+
+In this project, I will be using BRFSS survey data in 2019.
+
+### Aims
+
+This project aims to predict whether a person is at risk for heart disease based on BRFSS survey data. Since the objective of BRFSS is to support monitoring and analyzing factors influencing public health in the U.S., it is of interest to examine if survey questions from BRFSS can be used for preventative health screening for heart disease.
+
+## Loading Packages and Data
+
+```{r}
+set.seed(474)
+library(tidyverse) 
+library(tidymodels) 
+library(corrplot)
+library(dplyr)
+library(ROSE)
+library(xgboost)
+library(kknn)
+library(gridExtra)
+setwd('/Users/zengspencer/pstat131')
+```
+
+```{r,eval=FALSE, echo=FALSE}
+brfss_raw <- read.csv('brfss_2019.csv') 
+```
+
+```{r,eval=FALSE, echo=FALSE}
+save(brfss_raw,file = "/Users/zengspencer/pstat131/brfss_raw.rda")
+```
+
+```{r}
+load("/Users/zengspencer/pstat131/brfss_raw.rda")
+```
+
+## Cleaning and Pre-processing
+
+### Feature Selection
+
+As we can see below, the original data set contains 343 variables and 418,268 observations in total. Since many of them are not related to my project, I'll select 17 predictors based on preliminary literature review and rename columns.
+
+```{r}
+dim(brfss_raw)
+```
+
+```{r}
+# selected variable of interest 
+brfss_selected <- brfss_raw %>% select('CVDCRHD4', 'X_BMI5', 'SMOKE100', 'X_RFDRHV7','CVDSTRK3','MENTHLTH', 'PHYSHLTH','DIFFWALK','EXERANY2','DIABETE4','X_IMPRACE','X_AGEG5YR','BPHIGH4','TOLDHI2','CVDSTRK3','FRUIT2','FVGREEN1','INCOME2','SEXVAR')
+
+# rename columns
+brfss_selected <- brfss_selected %>% rename(
+  'heart_disease' = 'CVDCRHD4',
+  'bmi' = 'X_BMI5',
+  'heavy_smoker' = 'SMOKE100',
+  'heavy_alcohol' = 'X_RFDRHV7',
+  'stroke' = 'CVDSTRK3',
+  'mental_health' = 'MENTHLTH',
+  'physical_health' = 'PHYSHLTH',
+  'difficult_walk' = 'DIFFWALK',
+  'exercise' = 'EXERANY2',
+  'diabetes' = 'DIABETE4',
+  'race' = 'X_IMPRACE',
+  'age' = 'X_AGEG5YR',
+  'high_bp' = 'BPHIGH4',
+  'high_chol'= 'TOLDHI2',
+  'stroke'='CVDSTRK3',
+  'fruit' = 'FRUIT2',
+  'veggies' = 'FVGREEN1',
+  'income' = 'INCOME2',
+  'sex' = 'SEXVAR'
+)
+```
+
+### Missing Values
+
+Below is a data frame of variables containing missing values. We can see bmi, veggies, fruit, high_chol, exercise, heavy_smoker, difficult_walk, and income have comparatively more missing values (greater than 100).
+
+```{r}
+# check for missing values
+missing_values <- brfss_selected %>%
+  is.na() %>%
+  colSums()
+
+df_mval <- data.frame(missing_values)
+df_mval 
+```
+
+Since the data set is large with 418,268 observations in total, I'll drop rows containing missing values.
+
+```{r}
+# drop missing values 
+brfss <- brfss_selected %>% 
+  drop_na() 
+```
+
+We can see, after dropping, we still have 341,083 observations.
+
+```{r}
+dim(brfss)
+```
+
+When I checked the [code book](https://www.cdc.gov/brfss/annual_data/2019/pdf/codebook19_llcp-v2-508.HTML) provided by CDC, most categorical variables contain levels "don't know" and "refused". Since these levels do not provide useful information to my project, I'll drop observations containing these levels.
+
+```{r}
+
+brfss <- brfss %>% subset(
+  heart_disease != 7 & heart_disease !=9 & heavy_smoker != 7 & heavy_smoker != 9
+  & heavy_alcohol != 7 & heavy_alcohol != 9 & stroke != 7 & stroke != 9 & mental_health != 77 & mental_health != 99 
+  & physical_health != 77 & physical_health != 99 & difficult_walk != 7 & difficult_walk != 9 &
+  diabetes != 7 & diabetes != 9 & age != 14 & high_bp != 7 & high_bp != 9 & exercise != 7 &
+  exercise != 9 & fruit != 777 & fruit != 999 & veggies != 777 & veggies != 999 & income !=
+  77 & income != 99 & high_chol != 7 & high_chol != 9)
+
+# convert to factors 
+  brfss <- brfss %>% mutate(
+    heart_disease = factor(heart_disease,levels = c(1,2)),
+    heavy_smoker = factor(heavy_smoker),
+    heavy_alcohol = factor(heavy_alcohol),
+    stroke = factor(stroke),
+    mental_health = factor(mental_health),
+    physical_health = factor(physical_health),
+    exercise = factor(exercise),
+    diabetes = factor(diabetes),
+    race = factor(race),
+    high_bp = factor(high_bp),
+    high_chol = factor(high_chol),
+    income = factor(income),
+    sex = factor(sex))
+```
+
+And we are left with 263,841 observations
+
+```{r}
+dim(brfss)
+```
+
+### Balancing the Dataset
+
+As we can see below, the response variable is highly imbalanced, with the percent of ratio of the number of respondents with heart disease to the number of respondents without heart disease being around 6.3%.
+
+```{r}
+summary(brfss$heart_disease)
+```
+
+Since the data set is still pretty large, I decided to balance it by undersampling, keeping all of the data in the minority class and randomly deleting observations in the majority class until there are equal number of observations in each class.
+
+```{r}
+# balance the data 
+brfss_balanced <- ovun.sample(heart_disease~., data=brfss, p=0.5, seed = 474,
+method="under")$data
+
+```
+
+After undersampling, I obtained a dataset with 31,394 observations.
+
+```{r}
+dim(brfss_balanced)
+```
+
+## Dataset
+
+Below is the table of variable description:
+
+| Name            | Variable Description                                                                                              | Type        |
+|-------------------|----------------------------------|-------------------|
+| heart_disease   | (Ever told) you had angina or coronary heart disease?                                                             | categorical |
+| bmi             | Body Mass Index                                                                                                   | numeric     |
+| heavy_smoker    | Have you smoked at least 100 cigarettes in your entire life?                                                      | categorical |
+| heavy_alcohol   | Heavy drinkers (adult men having more than 14 drinks per week and adult women having more than 7 drinks per week) | categorical |
+| stroke          | (Ever told) you had a stroke.                                                                                     | categorical |
+| mental_health   | For how many days during the past 30 days was your mental health not good?                                        | categorical |
+| physical_health | For how many days during the past 30 days was your physical health not good                                       | categorical |
+| difficult_walk  | Do you have serious difficulty walking or climbing stairs?                                                        | categorical |
+| exercise        | During the past month, other than your regular job, did you participate in any physical activities or exercises?  | categorical |
+| diabetes        | (Ever told) (you had) diabetes?                                                                                   | categorical |
+| race            | Race category                                                                                                     | categorical |
+| age             | Fourteen-level age category                                                                                       | categorical |
+| high_bp         | (Ever told) (you had) high blood pressure?                                                                        | categorical |
+| high_chol       | (Ever told) you had) high blood cholesterol?                                                                      | categorical |
+| fruit           | Not including juices, how often did you eat fruit?                                                                | categorical |
+| veggies         | How often did you eat a green leafy or lettuce salad, with or without other vegetables?                           | categorical |
+| income          | Annual household income category                                                                                  | categorical |
+| sex             | Sex of respondent                                                                                                 | categorical |
+
+Below is the first six rows of the tidied dataset:
+
+```{r}
+head(brfss_balanced)
+```
+
+## Data Splitting
+
+I will split the dataset into a training set and a testing set. The proportion of the training set to the whole dataset is 0.7.
+
+```{r}
+brfss_split <- brfss_balanced %>% 
+  initial_split(prop = 0.7, strata = "heart_disease")
+
+brfss_train <- training(brfss_split)
+brfss_test <- testing(brfss_split)
+```
+
+```{r}
+dim(brfss_train)
+dim(brfss_test)
+```
+
+## Exploratory Data Analysis
+
+Before model building, let's explore some correlations within our training set.
+
+[![](Screen%20Shot%202022-12-11%20at%208.41.35%20PM.png){width="477" height="347"}](https://www.diabetesselfmanagement.com/managing-diabetes/complications-prevention/preventing-coronary-heart-disease/)
+
+### Heart Disease
+
+I will first plot a barplot of our response variable heart_disease.
+
+```{r}
+brfss_train %>% 
+  ggplot(aes(x = heart_disease)) +
+  geom_bar(fill='lightblue') + 
+  labs(title = 'Distribution of heart disease') + 
+  theme_minimal()
+```
+
+We can see there are equal number of observations in each class since I have balanced the dataset.
+
+### Demographic Risk Factors
+
+I will explore the relationship between heart disease and demographic risk factors including age, sex, race, and income.
+
+#### Sex
+
+```{r}
+plt_sex <-brfss_train %>% 
+  ggplot(aes(x = heart_disease, group = factor(sex) ,fill=factor(sex))) + 
+  geom_bar(position =  position_stack()) + 
+  labs(y = "Cases", x = "Heart Disease", title = 'Barplot of heart disease by sex') +
+  scale_fill_discrete(labels=c('Male', 'Female')) + 
+  guides(fill=guide_legend(title="Sex")) + 
+  theme_minimal()
+
+plt_sex
+
+```
+
+From this stacked barplot, we can see males are more prone to heart disease compared with females.
+
+#### Race
+
+```{r}
+labels <- as_labeller(c('1' = 'White','2' = 'Black','3' = 'Asian','4' = 'American Indian','5' = 'Hispanic','6' = 'Other'))
+plt_race <- brfss_train %>% 
+  ggplot(aes(x = race, group = factor(heart_disease) ,fill=factor(heart_disease))) + 
+  geom_bar(position = position_stack()) + 
+  facet_wrap(~race,scales = "free",labeller = labels) + 
+  guides(fill=guide_legend(title="Heart Disease")) + 
+  scale_fill_discrete(labels=c('No', 'Yes')) + 
+  labs(title = 'Barplot of heart disease from each race ') + 
+  theme_minimal() 
+
+ 
+
+
+plt_race
+```
+
+The barplot of heart disease from each race category shows that American Indian is most prone to heart disease.
+
+#### Age
+
+```{r}
+plt_age <- brfss_train %>% 
+  ggplot(aes(x = age, group = factor(heart_disease) ,fill=factor(heart_disease))) + 
+  geom_bar(position = position_stack()) + 
+  scale_x_discrete(labels = c('18 to 24', '25 to 29', '30 to 34', 
+                              '35 to 39', '40 to 44', '45 to 49','50 to 59','60 to 64',
+                              '65 to 69', '70 to 74', '75 to 79', '80+')) + 
+  
+  guides(fill=guide_legend(title="Heart Disease")) +
+  scale_fill_discrete(labels=c('No', 'Yes')) + 
+  labs(y = "Cases", x = "Age groups", title = 'Barplot of heart disease by age') + 
+  theme_minimal()
+
+plt_age
+```
+
+In terms of age, the number of people having heart disease increases significantly as age increases.
+
+#### Income
+
+```{r}
+plt_income <- brfss_train %>% 
+  ggplot(aes(x = income, group = factor(heart_disease) ,fill=factor(heart_disease))) + 
+  geom_bar(position = position_stack()) + 
+  scale_x_discrete(labels = c('<10k', '10k to 15k', '15k to 20k', 
+                              '20k to 25k', '25k to 30k', '30k to 35k',
+                              '35k to 40k','40k to 50k',
+                              '50k to 75k', '75k+')) + 
+  guides(fill=guide_legend(title='Heart Disease')) +
+  scale_fill_discrete(labels=c('No', 'Yes')) + 
+  labs(y = "Cases", x = "Income Levels", title = 'Barplot of heart disease by income levels') + 
+  theme_minimal()
+
+plt_income
+```
+
+When considering income, low income groups tend to be associated with a higher proportion of people getting heart disease.
+
+### Behavioral Risk Factors
+
+Below, I examine the relationship between heart disease and personal behaviors including heavy smoking, heavy alcohol consumption, mental health, physcial health, and bmi.
+
+#### Mental health and physical health
+
+```{r}
+mental_health <- brfss_train %>% subset (mental_health != 88)
+plt_mh <- mental_health %>% 
+  ggplot(aes(x = heart_disease, group = factor(mental_health) ,fill=factor(mental_health))) + 
+  geom_bar(position = position_stack()) + 
+  guides(fill=guide_legend(title="Days mental health not good")) + 
+  theme_minimal() 
+  
+
+plt_ph <- brfss_train %>% 
+  ggplot(aes(x = heart_disease, group = factor(physical_health) ,fill=factor(physical_health))) + geom_bar(position = position_stack()) + 
+  guides(fill=guide_legend(title="Days physical health not good")) +
+  theme_minimal()
+
+grid.arrange(plt_mh, plt_ph, ncol = 2) 
+```
+
+In terms of mental health, the number of people having poor mental health over 20 days are higher among those with heart diseases; meanwhile, the number of people having no physical health issues during the past month is higher among those without heart diseases. These indicate that poor mental and physical health are associated with heart disease.
+
+#### Heavy smoking
+
+```{r}
+brfss_train %>% 
+  ggplot(aes(x = heart_disease, group = factor(heavy_smoker) ,fill=factor(heavy_smoker))) + 
+  geom_bar(position = position_stack()) + 
+  guides(fill=guide_legend(title="heavy smoking")) +
+  scale_fill_discrete(labels=c('Yes', 'No')) + 
+  labs(title = 'Barplot of heart disease by smoking status') + 
+  theme_minimal()
+  
+```
+
+The barplot of heart disease by heavy_smoker shows that people with heart disease smokes more frequently compared with those without .
+
+#### heavy alcohol consumption
+
+```{r}
+brfss_train %>% 
+  ggplot(aes(x = heart_disease, group = factor(heavy_alcohol) ,fill=factor(heavy_alcohol))) + 
+  geom_bar(position = position_stack()) + 
+  guides(fill=guide_legend(title="heavy drinker")) +
+  scale_fill_discrete(labels=c('No', 'Yes')) + 
+  labs(title = 'Barplot of heart disease by alcohol consumption') + 
+  theme_minimal()
+  
+```
+
+Surprisingly, heavy alcohol consumption does not seem to significantly differ between those with heart diseases and those without.
+
+#### BMI
+
+```{r}
+ggplot(brfss_train, aes(x=bmi, color=heart_disease)) +
+  geom_density() + 
+  theme_minimal()
+```
+
+The density curve of bmi by heart disease shows that people having heart disease tends to have higher weight.
+
+## Model Building
+
+#### Setting up recipe
+
+I will set up a recipe to predict instances of heart disease, dummy coding categorical variables and normalizing all numerical variables.
+
+```{r}
+brfss_recipe <- recipe(heart_disease ~., data = brfss_train) %>%
+  step_dummy(all_nominal_predictors()) %>% 
+  step_center(all_numeric_predictors()) %>% 
+  step_scale(all_numeric_predictors()) 
+```
+
+#### Creating folds
+
+I will randomly divides the training set into 5 groups of approximately equal size. Since I have already balanced the dataset before, I'll not stratify the folds by response variable. These folds will be used for cross-validation, during which 1 fold will be used for assessment and the remaining 4 folds will be used for for analysis. This process will repeat 5 times, and a different validation set will be used each time.
+
+```{r}
+brfss_folds <- vfold_cv(brfss_train, v = 5)
+```
+
+### Elastic Net
+
+I will fit elastic net models, tuning penalty (amount of regularization) and mixture (proportion of lasso penalty) with 5 levels each
+
+```{r}
+# set up model and workflow 
+elastic_net_spec <- multinom_reg(penalty = tune(), 
+                                 mixture = tune()) %>% 
+  set_mode("classification") %>% 
+  set_engine("glmnet")
+
+en_workflow <- workflow() %>% 
+  add_recipe(brfss_recipe) %>% 
+  add_model(elastic_net_spec)
+
+# create a regular grid 
+en_grid <- grid_regular(penalty(range = c(-5, 5)), 
+                        mixture(range = c(0, 1)), levels = 5)
+```
+
+```{r, eval=FALSE}
+# fit on training set 
+tune_res_en <- tune_grid(
+  en_workflow,
+  resamples = brfss_folds, 
+  grid = en_grid
+)
+```
+
+After fitting models on the training set, I'll select the model with the highest roc_auc and save the result to an RDA file for future model evaluation
+
+```{r,eval=FALSE}
+# select the best model 
+best_model_en <- select_best(tune_res_en, metric = "roc_auc")
+
+en_final <- finalize_workflow(en_workflow, best_model_en)
+
+en_final_fit <- fit(en_final, data = brfss_train)
+
+save(tune_res_en, en_final_fit, en_workflow,best_model_en, file = "/Users/zengspencer/pstat131/en.rda")
+```
+
+### K Nearest Neighbors
+
+I will fit a k nearest neighbors, tuning the number of neighbors with 5 levels.
+
+```{r}
+# set up model and workflow 
+knn_spec <- 
+  nearest_neighbor(neighbors = tune()) %>% 
+  set_mode("classification") %>% 
+  set_engine("kknn")
+
+# create grid 
+knn_workflow <- workflow() %>% 
+  add_model(knn_spec) %>% 
+  add_recipe(brfss_recipe)
+
+# create a regular grid 
+knn_grid <- grid_regular(neighbors(range = c(1, 10)), levels = 5)
+```
+
+```{r,eval=FALSE}
+# fit on training set 
+tune_res_knn <- tune_grid(
+  knn_workflow,
+  resamples = brfss_folds, 
+  grid = knn_grid
+)
+
+
+```
+
+Similar to previous model, I will select and save the best model to an RDA fille.
+
+```{r,eval=FALSE}
+# select the best model 
+best_model_knn <- select_best(tune_res_knn, metric = "roc_auc")
+
+knn_final <- finalize_workflow(knn_workflow, best_model_knn)
+
+knn_final_fit <- fit(knn_final, data = brfss_train)
+
+save(tune_res_knn,knn_final_fit, knn_workflow, best_model_knn, file = "/Users/zengspencer/pstat131/knn.rda")
+```
+
+### Random Forest
+
+I will fit random forest, tuning trees, mtry (the number of randomly selected predictors), and min_n (minimal node size) with 5 levels each.
+
+```{r}
+# set up model and workflow 
+rf_spec<-rand_forest() %>%
+  set_engine("ranger",importance="impurity")%>%
+  set_mode("classification")
+
+rf_wf<-workflow()%>%
+  add_model(rf_spec %>% set_args(mtry=tune(),trees=tune(),min_n=tune()))%>%
+  add_formula(heart_disease~.)
+
+# create grid 
+rf_grid <-grid_regular(
+  mtry(range= c(1,17)),
+  trees(range = c(50,200)),
+min_n(range = c(10,30)),
+  levels = 5)
+```
+
+```{r,eval=FALSE}
+# fit on training set 
+tune_res_rf <-tune_grid(
+  rf_wf,
+  resample = brfss_folds,
+  grid = rf_grid,
+  metrics = metric_set(roc_auc)
+)
+```
+
+After fitting models on the training set, I'll select the model with the highest roc_auc and save the result to an RDA file for future model evaluation
+
+```{r,eval=FALSE}
+# select the best model 
+best_model_rf <- select_best(tune_res_rf, metric = "roc_auc")
+
+rf_final <- finalize_workflow(rf_wf, best_model_rf)
+
+rf_final_fit <- fit(rf_final, data = brfss_train)
+save(tune_res_rf,rf_final_fit, rf_wf, best_model_rf, file = "/Users/zengspencer/pstat131/rf.rda")
+```
+
+### Boosted Tree
+
+I will fit boosted trees, tuning mtry (the number of randomly selected predictors), min_n (minimal node size), and learning rate with 5 levels each
+
+```{r}
+# set up model and workflow 
+
+boost_spec<-boost_tree()%>%
+  set_engine("xgboost")%>%
+  set_mode("classification")
+
+boost_wf<-workflow()%>%
+  add_model(boost_spec %>% set_args(
+    learn_rate = tune(),
+    trees = tune())) %>%
+  add_formula(heart_disease~.)
+
+# create a grid
+boost_grid <- grid_regular(
+  learn_rate(range = c(-2,0.5)),
+  trees(range = c(10,1000)),
+  levels = 5)
+```
+
+```{r,eval = FALSE}
+# fit on training set 
+tune_res_boost <-tune_grid(
+  boost_wf,
+  resample = brfss_folds,
+  grid = boost_grid,
+  metrics = metric_set(roc_auc)
+)
+
+```
+
+After fitting models on the training set, I'll select the model with the highest roc_auc and save the result to an RDA file for future model evaluation
+
+```{r,eval=FALSE}
+# select the best model 
+best_model_boost <- select_best(tune_res_boost, metric = "roc_auc")
+
+boost_final <- finalize_workflow(boost_wf, best_model_boost)
+
+boost_final_fit <- fit(boost_final, data = brfss_train)
+
+# save result 
+save(tune_res_boost,boost_final_fit, boost_wf, best_model_boost,file = "/Users/zengspencer/pstat131/boost.rda")
+```
+
+## Model Evaluation
+
+```{r}
+# loading stored results
+load("/Users/zengspencer/pstat131/boost.rda")
+load("/Users/zengspencer/pstat131/rf.rda")
+load("/Users/zengspencer/pstat131/knn.rda")
+load("/Users/zengspencer/pstat131/en.rda")
+```
+
+### Elastic net
+
+The autoplot of result shows that smaller values of mixture (proportion of lasso penalty) and smaller values of penalty (amount of regularization) leads to higher accuracy and roc_auc.
+
+```{r}
+autoplot(tune_res_en)
+```
+
+### K nearest neighbors
+
+The autoplot of knn model shows that model performance increases as the number of neighbors increases.
+
+```{r}
+autoplot(tune_res_knn)
+```
+
+### Random forest
+
+The autoplot of random forest shows that the model perform best when the minimal node size and the number of trees are relatively large, and the number of predictors is relatively small (around 5).
+
+```{r}
+autoplot(tune_res_rf)
+```
+
+### Boosted tree
+
+The autoplot of boosted tree shows that model perform best when the learning rate is small and the number of tress is large.
+
+```{r}
+autoplot(tune_res_boost)
+```
+
+## Comparing model performances
+
+Comparison of model accuracy shows that knn model with the number of trees equals 10 has the highest accuracy.
+
+```{r,eval=FALSE,echo=FALSE}
+en_best <- data.frame(collect_metrics(tune_res_en)%>%arrange(-mean))[1,]
+knn_best <- data.frame(collect_metrics(tune_res_knn)%>%arrange(-mean))[1,]
+rf_best <- data.frame(collect_metrics(tune_res_rf)%>%arrange(-mean))[1,]
+boost_best <- data.frame(collect_metrics(tune_res_boost)%>%arrange(-mean))[1,]
+
+models <- c("elastic net", "knn", "random forest", "boosted tree")
+roc_auc <- c(en_best$mean,knn_best$mean, rf_best$mean,boost_best$mean)
+
+
+results <- tibble(roc_auc = roc_auc, models = models)
+results %>% 
+  arrange(-roc_auc)
+```
+
+```{r}
+en_acc <- augment(en_final_fit, new_data = brfss_train) %>%
+  accuracy(truth = heart_disease, estimate = .pred_class)
+
+knn_acc <- augment(knn_final_fit, new_data = brfss_train) %>%
+  accuracy(truth = heart_disease, estimate = .pred_class)
+
+rf_acc <- augment(rf_final_fit, new_data = brfss_train) %>%
+  accuracy(truth = heart_disease, estimate = .pred_class)
+
+boost_acc <- augment(boost_final_fit, new_data = brfss_train) %>%
+  accuracy(truth = heart_disease, estimate = .pred_class)
+
+
+accuracies <- c(en_acc$.estimate, knn_acc$.estimate, 
+                rf_acc$.estimate, boost_acc$.estimate)
+models <- c("elastic net", "knn", "random forest", "boosted tree")
+
+results <- tibble(accuracies = accuracies, models = models)
+results %>% 
+  arrange(-accuracies)
+```
+
+## Model performance on testing set
+
+We've selected our best model --- knn with 10 neighbours.
+
+[![](Screen%20Shot%202022-12-11%20at%209.00.13%20PM.png){width="744" height="444"}](https://www.jcchouinard.com/k-nearest-neighbors/)
+
+Let's fit our selected model to the testing set and see the results.
+
+```{r,,eval=FALSE}
+knn_wf_tuned <- knn_workflow %>% 
+  finalize_workflow(select_best(tune_res_boost, metric = "roc_auc"))
+best_fit_boost <- fit(boost_wf_tuned, brfss_test)
+```
+
+```{r,,eval=FALSE}
+save(best_fit_knn, file = "/Users/zengspencer/pstat131/best_fit_knn.rda")
+```
+
+```{r}
+load("/Users/zengspencer/pstat131/best_fit_knn.rda")
+```
+
+#### ROC curve
+
+The roc curve is to the up left corner of the panel, suggesting that the model performs pretty well.
+
+```{r}
+options(yardstick.event_first = FALSE)
+
+# roc curve 
+augment(best_fit_knn, new_data = brfss_test) %>%
+  roc_curve(heart_disease, .pred_1) %>%
+  autoplot() 
+```
+
+#### roc_auc
+
+The roc_auc of knn on our testing set is around 0.966.
+
+```{r}
+options(yardstick.event_first = FALSE)
+augment(best_fit_knn, new_data = brfss_test) %>%
+  roc_auc(heart_disease, estimate = .pred_1) %>%
+  select(.estimate)  
+```
+
+#### Confusion matrix
+
+```{r}
+options(yardstick.event_first = FALSE)
+augment(best_fit_knn, brfss_test) %>%
+  conf_mat(truth = heart_disease, estimate = .pred_class) %>%
+  autoplot(type="heatmap")
+```
+
+## Conclusion
+
+In conclusion, k nearest neighbors performed the best while elastic net performed the worst. I'm a little bit surprised that random forest and boosted trees performed worse than knn. Overall, the result suggests that BRFSS's survey questions is good for preventative health screening and monitoring heart disease. In terms of future analysis, if computing power allows, it may be useful to reexamine the technique used to balance the dataset and choose another one (i.e. oversampling) to see if model performance can be improved. Also, rather than performing feature selection based on literature review, I might try feature extraction to see if some other indicators are ignored. Finally, I would like to see if BRFSS survey questions can be used as indicators for other chronic health conditions, such as heart attack and stroke.
